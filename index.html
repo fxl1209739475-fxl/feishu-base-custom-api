@@ -587,8 +587,8 @@ async function callImage(input, signal) {
   const model = $('model').value.trim() || 'gpt-image-2';
   const edit = imageUrls.length > 0;   // 有参考图→图生图(保产品),否则文生图
   const url = imagesEndpoint(edit ? 'edits' : 'generations');
-  const body = edit ? { model, image: imageUrls[0], prompt: text, size, response_format: 'b64_json' }
-                    : { model, prompt: text, size, response_format: 'b64_json' };
+  const body = edit ? { model, image: imageUrls[0], prompt: text, size }
+                    : { model, prompt: text, size };
   const resp = await fetch(url, { method: 'POST', signal, headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + $('apiKey').value }, body: JSON.stringify(body) });
   if (!resp.ok) throw new Error('生图API ' + resp.status + ': ' + (await resp.text()).slice(0, 200));
   const data = await resp.json();
