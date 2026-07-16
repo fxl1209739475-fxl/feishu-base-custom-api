@@ -587,9 +587,21 @@ async function callImage(input, signal) {
   const model = $('model').value.trim() || 'gpt-image-2';
   const edit = imageUrls.length > 0;   // 有参考图→图生图(保产品),否则文生图
   const url = imagesEndpoint(edit ? 'edits' : 'generations');
+  const auth = 'Bearer ' + $('apiKey').value;
   const body = edit ? { model, image: imageUrls[0], prompt: text, size }
                     : { model, prompt: text, size };
-  const resp = await fetch(url, { method: 'POST', signal, headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + $('apiKey').value }, body: JSON.stringify(body) });
+  let resp = await fetch(url, { method: 'POST', signal, headers: { 'Content-Type': 'application/json', 'Authorization': auth }, body: JSON.stringify(body) });
+  if (edit && [400, 404, 415, 422].includes(resp.status)) {
+    // 图生图兼容:中转普遍收 image=URL,OpenAI 官方/严格端点只收 multipart 文件→下载参考图转文件上传重试(4xx 未生成未扣费,重试安全)
+    const jsonErr = (await resp.text()).slice(0, 200);
+    const img = await fetch(imageUrls[0], { signal }).catch(() => null);
+    if (!img || !img.ok) throw new Error('生图API ' + resp.status + ': ' + jsonErr);
+    const blob = await img.blob();
+    const fd = new FormData();
+    fd.append('model', model); fd.append('prompt', text); fd.append('size', size);
+    fd.append('image', new File([blob], 'ref.png', { type: blob.type || 'image/png' }));
+    resp = await fetch(url, { method: 'POST', signal, headers: { 'Authorization': auth }, body: fd });
+  }
   if (!resp.ok) throw new Error('生图API ' + resp.status + ': ' + (await resp.text()).slice(0, 200));
   const data = await resp.json();
   const first = data.data && data.data[0];
