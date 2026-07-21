@@ -31,7 +31,7 @@
 </head>
 <body>
 <h1>🔌 多维表格 · 自定义 API 插件</h1>
-<div class="sub">选输入列(产品图/提示词) → 写生图提示词 → 并发生成图片写回附件列</div>
+<div class="sub">选输入列(产品图/提示词) → 写提示词 → 并发生成图片/视频写回附件列</div>
 
 <div class="card">
   <h2>① 模型配置（存在本机浏览器，不上传）</h2>
@@ -53,8 +53,58 @@
   <select id="taskType">
     <option value="text">📝 文本生成（写进文本列，如文案/脚本）</option>
     <option value="image">🖼️ 图片生成（生成图写进附件列，如主图/分镜图）</option>
+    <option value="video">🎬 视频生成（生成4-15秒视频写进附件列）</option>
   </select>
   <div class="hint" id="imgHint" style="display:none">图片模式：模型名填生图模型（如 gpt-image-2 / doubao-seedream-4-0）；选了📎输入图=图生图(保产品)，没选=文生图。</div>
+  <div id="videoCfg" style="display:none">
+    <div class="hint">🎬 视频模式独立配置。方舟官方没开浏览器跨域，API 地址填你服务器上的透传代理（形如 http://127.0.0.1:8000/api/ark/v3）；选中转站格式则直接填中转地址。⚠️ Seedance 2.0 约1元/秒（15秒≈15元/条），先用「只跑当前光标所在行」试效果再批量。</div>
+    <label>接口格式</label>
+    <select id="vidApiKind">
+      <option value="ark">火山方舟 · Seedance（经服务器代理）</option>
+      <option value="oai">中转站 · OpenAI 视频格式（/v1/videos）</option>
+    </select>
+    <label>视频 API 地址</label>
+    <input type="text" id="vidApiBase" placeholder="http://127.0.0.1:8000/api/ark/v3 或中转站地址">
+    <label>视频 API Key</label>
+    <input type="password" id="vidApiKey" placeholder="方舟 ARK_API_KEY 或中转站 Key">
+    <label>视频模型（不确定就留空，默认 Seedance 2.0）</label>
+    <input type="text" id="vidModel" list="vidModelList" placeholder="留空=doubao-seedance-2-0-260128">
+    <datalist id="vidModelList">
+      <option value="doubao-seedance-2-0-260128">Seedance 2.0（默认·4-15秒·最高2K·音画同步）</option>
+      <option value="doubao-seedance-2-0-fast-260128">Seedance 2.0 Fast（便宜·不支持1080p）</option>
+      <option value="doubao-seedance-2-0-mini-260615">Seedance 2.0 mini（约半价·最高720P·以方舟控制台实际模型ID为准）</option>
+    </datalist>
+    <div class="row">
+      <div>
+        <label>时长（秒，4-15）</label>
+        <input type="number" id="vidDur" value="15" min="4" max="15">
+      </div>
+      <div>
+        <label>分辨率</label>
+        <select id="vidRes">
+          <option value="720p">720p（推荐）</option>
+          <option value="480p">480p（最便宜）</option>
+          <option value="1080p">1080p</option>
+        </select>
+      </div>
+      <div>
+        <label>画面比例</label>
+        <select id="vidRatio">
+          <option value="adaptive">自适应（跟参考图）</option>
+          <option value="9:16">竖版 9:16</option>
+          <option value="16:9">横版 16:9</option>
+          <option value="1:1">方形 1:1</option>
+        </select>
+      </div>
+    </div>
+    <label>📎输入图的用法（选了附件输入列才生效）</label>
+    <select id="vidImgMode">
+      <option value="first">当首帧（画面从这张图动起来）</option>
+      <option value="ref">当参考图（保产品长相，Seedance 2.0 多图参考）</option>
+    </select>
+    <label>任务ID列（可选，选一个文本列：任务号即时落表，中途关面板也能点「续查」接着拿片）</label>
+    <select id="taskCol"></select>
+  </div>
   <label>输入列（点选，可多个；📎附件列：文本模式=发图给视觉模型，图片模式=作产品参考图）</label>
   <div class="chips" id="inputChips"></div>
   <label>提示词模板（用【列名】引用输入列内容）</label>
@@ -92,6 +142,7 @@
 
 <button class="primary" id="runBtn">▶ 开始出图（附件列为空的行）</button>
 <button class="ghost" id="runSelBtn">只跑当前光标所在行</button>
+<button class="ghost" id="resumeBtn" style="display:none">⏯ 续查未完成的视频任务</button>
 <div id="log"></div>
 
 <script type="module">
@@ -461,8 +512,22 @@ const saveCfg = () => localStorage.setItem(CFG_KEY, JSON.stringify({
   apiBase: $('apiBase').value, apiKey: $('apiKey').value, model: $('model').value, prompt: $('prompt').value,
   inputs: [...document.querySelectorAll('.chip.on')].map(c => c.textContent),
   output: $('outputSel').value, concurrency: $('concurrency').value, maxRows: $('maxRows').value, imgSize: $('imgSize').value,
+  taskType: $('taskType').value, taskCol: $('taskCol').value,
+  vidApiKind: $('vidApiKind').value, vidApiBase: $('vidApiBase').value, vidApiKey: $('vidApiKey').value,
+  vidModel: $('vidModel').value, vidDur: $('vidDur').value, vidRes: $('vidRes').value, vidRatio: $('vidRatio').value, vidImgMode: $('vidImgMode').value,
 }));
 const loadCfg = () => { try { return JSON.parse(localStorage.getItem(CFG_KEY)) || {}; } catch { return {}; } };
+
+// ── 任务类型切换:视频模式显示自己的配置块,按钮文案跟着换 ──
+const isVideoMode = () => $('taskType').value === 'video';
+const runBtnLabel = () => isVideoMode() ? '▶ 开始生成视频（附件列为空的行）' : '▶ 开始出图（附件列为空的行）';
+function toggleTaskUI() {
+  const v = isVideoMode();
+  $('videoCfg').style.display = v ? '' : 'none';
+  $('sizeRow').style.display = v ? 'none' : '';
+  $('resumeBtn').style.display = v ? '' : 'none';
+  if (!running) $('runBtn').textContent = runBtnLabel();
+}
 
 // ── 全局状态 ──
 let table = null, tableId = null, fieldMetas = [];
@@ -491,6 +556,13 @@ async function refreshTable() {
   const fs = fieldMetas.filter(f => f.type === 17);   // 输出=附件列
   for (const f of fs) { const o = document.createElement('option'); o.value = f.id; o.textContent = f.name; if (cfg.output === f.id) o.selected = true; sel.appendChild(o); }
   if (!fs.length) { const o = document.createElement('option'); o.value = ''; o.textContent = '(本表没有附件列,请先建一个附件字段)'; sel.appendChild(o); }
+  // 任务ID列(视频断点续查用):只列文本字段
+  const tsel = $('taskCol'); tsel.innerHTML = '';
+  const none = document.createElement('option'); none.value = ''; none.textContent = '(不落表·中途关面板未完成的任务会断)'; tsel.appendChild(none);
+  for (const f of fieldMetas.filter(f => f.type === 1)) {
+    const o = document.createElement('option'); o.value = f.id; o.textContent = f.name;
+    if (cfg.taskCol === f.id) o.selected = true; tsel.appendChild(o);
+  }
 }
 
 async function init() {
@@ -504,8 +576,12 @@ async function init() {
   if (cfg.concurrency) $('concurrency').value = cfg.concurrency;
   if (cfg.maxRows) $('maxRows').value = cfg.maxRows;
   if (cfg.imgSize) $('imgSize').value = cfg.imgSize;
+  if (cfg.taskType) $('taskType').value = cfg.taskType;
+  ['vidApiKind','vidApiBase','vidApiKey','vidModel','vidDur','vidRes','vidRatio','vidImgMode'].forEach(id => { if (cfg[id] != null && cfg[id] !== '') $(id).value = cfg[id]; });
   await refreshTable();
-  ['apiBase','apiKey','model','prompt','outputSel','concurrency','maxRows','imgSize'].forEach(id => $(id).addEventListener('change', saveCfg));
+  ['apiBase','apiKey','model','prompt','outputSel','concurrency','maxRows','imgSize','taskType','taskCol','vidApiKind','vidApiBase','vidApiKey','vidModel','vidDur','vidRes','vidRatio','vidImgMode'].forEach(id => $(id).addEventListener('change', saveCfg));
+  $('taskType').addEventListener('change', toggleTaskUI);
+  toggleTaskUI();
   try {
     bitable.base.onSelectionChange(async () => {
       if (running) return;
@@ -621,6 +697,247 @@ async function writeImage(fid, rid, res, signal) {
   return file.size;
 }
 
+// ══════════ 🎬 视频生成(全行业都是异步任务制:提交→轮询→取片) ══════════
+const VIDEO_TIMEOUT_MS = 25 * 60000;  // 单行总时限:官方无SLA,高峰排队会更久;超时后任务号已落表,可「续查」再取
+const POLL_MS = 10000;
+
+const vidKind = () => $('vidApiKind').value;
+const vidModelName = () => $('vidModel').value.trim() || 'doubao-seedance-2-0-260128';
+const vidDurVal = () => Math.max(4, Math.min(15, parseInt($('vidDur').value) || 15));
+
+// 地址归一:方舟代理写到 /api/ark 或 /api/ark/v3 都行;中转站给根域或带 /v1 都行
+function vidBase() {
+  let b = $('vidApiBase').value.trim().replace(/\/+$/, '');
+  if (vidKind() === 'ark') {
+    b = b.replace(/\/chat\/completions.*$/, '').replace(/\/contents\/generations\/tasks.*$/, '').replace(/\/+$/, '');
+    const host = b.replace(/^https?:\/\//, '').split('/')[0].replace(/:\d+$/, '');
+    if (/\/api\/ark$/.test(b)) b += '/v3';
+    else if (/(^|\.)volces\.com$/.test(host) && !/\/api\/v3$/.test(b)) b += '/api/v3';
+  } else {
+    b = b.replace(/\/chat\/completions.*$/, '').replace(/\/videos.*$/, '').replace(/\/+$/, '');
+    if (!/\/v1$/.test(b)) b += '/v1';
+  }
+  return b;
+}
+
+// 批量开始时把全部视频配置快照进 ctx,贯穿提交/轮询/下载——防止批量跑一半改表单导致格式/地址/Key错配
+function vidCtx() {
+  return { kind: vidKind(), base: vidBase(), key: $('vidApiKey').value.trim(), model: vidModelName(),
+           dur: vidDurVal(), res: $('vidRes').value, ratio: $('vidRatio').value, imgMode: $('vidImgMode').value };
+}
+
+async function vidFetch(ctx, url, opts, signal) {
+  const r = await fetch(url, { ...opts, signal, headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + ctx.key, ...(opts.headers || {}) } });
+  const text = await r.text();
+  let j = null; try { j = JSON.parse(text); } catch {}
+  if (!r.ok) {
+    const err = new Error('视频API ' + r.status + ': ' + String((j && j.error && j.error.message) || (j && j.detail) || text).slice(0, 200));
+    err.status = r.status;
+    throw err;
+  }
+  return j || {};
+}
+
+async function submitVideo(ctx, input, signal) {
+  const { text, imageUrls } = input;
+  if (ctx.kind === 'ark') {
+    // 方舟惯例:生成参数以 --参数 文本命令跟在提示词后
+    const content = [{ type: 'text', text: (text || '') + ' --resolution ' + ctx.res + ' --ratio ' + ctx.ratio + ' --duration ' + ctx.dur + ' --watermark false' }];
+    if (imageUrls.length) {
+      if (ctx.imgMode === 'ref') { for (const u of imageUrls) content.push({ type: 'image_url', image_url: { url: u }, role: 'reference_image' }); }
+      else { content.push({ type: 'image_url', image_url: { url: imageUrls[0] } }); if (imageUrls.length > 1) log('· 首帧模式只用第1张图,多图请切「参考图」用法'); }
+    }
+    const j = await vidFetch(ctx, ctx.base + '/contents/generations/tasks', { method: 'POST', body: JSON.stringify({ model: ctx.model, content }) }, signal);
+    if (!j.id) throw new Error('提交任务未返回id: ' + JSON.stringify(j).slice(0, 160));
+    return j.id;
+  }
+  // 中转站 OpenAI 视频格式(/v1/videos):seconds+size,厂商差异由中转站兜
+  let dur = ctx.dur, size;
+  if (/sora/i.test(ctx.model)) {
+    // Sora 系只收 4/8/12 秒和 720x1280/1280x720,就近夹紧免 400
+    dur = [4, 8, 12].reduce((a, b) => (Math.abs(b - ctx.dur) < Math.abs(a - ctx.dur) ? b : a));
+    if (dur !== ctx.dur) log('· Sora 只支持 4/8/12 秒,本行按 ' + dur + ' 秒提交');
+    size = ctx.ratio === '16:9' ? '1280x720' : (ctx.ratio === '9:16' ? '720x1280' : undefined);
+  } else {
+    const sz = ({ '480p': { '9:16': '480x854', '16:9': '854x480', '1:1': '480x480' }, '720p': { '9:16': '720x1280', '16:9': '1280x720', '1:1': '720x720' }, '1080p': { '9:16': '1080x1920', '16:9': '1920x1080', '1:1': '1080x1080' } })[ctx.res];
+    size = sz && sz[ctx.ratio];
+  }
+  const body = { model: ctx.model, prompt: text, seconds: String(dur) };
+  if (size) body.size = size;
+  if (imageUrls.length) log('· 中转站格式暂不支持带参考图,本行按纯文生视频提交');
+  const j = await vidFetch(ctx, ctx.base + '/videos', { method: 'POST', body: JSON.stringify(body) }, signal);
+  const id = j.id || j.task_id;
+  if (!id) throw new Error('提交任务未返回id: ' + JSON.stringify(j).slice(0, 160));
+  return id;
+}
+
+async function pollVideo(ctx, id, signal, deadline) {
+  let bad4xx = 0; // 连续4xx计数:401/403/404是致命错(Key错/任务过期被清),连中3次即判死,不再空转到超时
+  while (true) {
+    if (stopFlag) throw new Error('已手动停止(任务仍在云端跑,稍后可「续查」)');
+    if (Date.now() > deadline) throw new Error('超' + Math.round(VIDEO_TIMEOUT_MS / 60000) + '分钟未完成,稍后点「续查」再取');
+    let j = null;
+    try {
+      j = await vidFetch(ctx, ctx.kind === 'ark' ? ctx.base + '/contents/generations/tasks/' + id : ctx.base + '/videos/' + id, { method: 'GET' }, signal);
+      bad4xx = 0;
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      if (e.status >= 400 && e.status < 500 && e.status !== 429) {
+        bad4xx++;
+        if (bad4xx >= 3) { e.permanent = true; e.message = '任务查询连续失败(' + e.message + ')——多半是Key错或任务已过保留期,不再重试'; throw e; }
+      }
+      log('· 查任务 ' + String(id).slice(0, 10) + '… 出错,稍后重试: ' + e.message);
+    }
+    if (j) {
+      const st = j.status;
+      if (st === 'succeeded' || st === 'completed') return j;
+      if (st === 'failed' || st === 'cancelled' || st === 'expired') {
+        const err = new Error('任务' + st + ': ' + String((j.error && j.error.message) || j.failure_reason || '').slice(0, 160));
+        err.permanent = true; // 云端终态,重查一万次也不会变,标记后写❌出队
+        throw err;
+      }
+    }
+    await sleep(POLL_MS);
+  }
+}
+
+async function downloadVideo(ctx, id, taskResult, signal) {
+  if (ctx.kind === 'oai') {
+    const r = await fetch(ctx.base + '/videos/' + id + '/content', { signal, headers: { 'Authorization': 'Bearer ' + ctx.key } });
+    if (!r.ok) throw new Error('下载成片失败 ' + r.status);
+    return new Uint8Array(await r.arrayBuffer());
+  }
+  const vurl = taskResult && taskResult.content && (taskResult.content.video_url || taskResult.content.url);
+  if (!vurl) throw new Error('任务完成但没拿到视频URL: ' + JSON.stringify(taskResult).slice(0, 160));
+  // 产物在TOS对象存储上,直连下载大概率被跨域拦→失败自动走代理 /fetch 中转
+  try { const r = await fetch(vurl, { signal }); if (r.ok) return new Uint8Array(await r.arrayBuffer()); } catch {}
+  const m = ctx.base.match(/^(.*\/api\/ark)(?:\/|$)/);
+  if (!m) throw new Error('浏览器直连下载被拦,且API地址不是本机代理(形如 http://127.0.0.1:8000/api/ark/v3),无法中转下载');
+  const r2 = await fetch(m[1] + '/fetch?url=' + encodeURIComponent(vurl), { signal });
+  if (!r2.ok) throw new Error('代理下载成片失败 ' + r2.status);
+  return new Uint8Array(await r2.arrayBuffer());
+}
+
+async function writeVideoCell(fid, rid, bytes) {
+  const file = new File([bytes], 'ai_video_' + rid.slice(-6) + '_' + Date.now() + '.mp4', { type: 'video/mp4' });
+  const tokens = await bitable.base.batchUploadFile([file]);
+  await table.setCellValue(fid, rid, [{ name: file.name, size: file.size, type: file.type, token: tokens[0], timeStamp: file.lastModified || Date.now() }]);
+  return file.size;
+}
+
+async function setTaskCell(rid, text) {
+  const fid = $('taskCol').value;
+  if (!fid) return;
+  try { await table.setCellValue(fid, rid, text); } catch (e) { log('· 任务ID写入失败(不影响生成): ' + e.message); }
+}
+
+// 读该行任务ID列里的在途任务(⏳前缀);❌(云端终败)和✅(已完成)都不算在途
+async function getPendingTask(rid) {
+  const fid = $('taskCol').value;
+  if (!fid) return null;
+  let s = ''; try { s = (await table.getCellString(fid, rid)) || ''; } catch {}
+  const m = s.match(/⏳(ark|oai):([A-Za-z0-9._-]+)/);
+  return m ? { kind: m[1], id: m[2] } : null;
+}
+
+async function processVideoRecords(recordIds) {
+  const outFid = $('outputSel').value;
+  const conc = Math.max(1, Math.min(10, parseInt($('concurrency').value) || 3));
+  const ctx = vidCtx(); // 快照配置,批量中途改表单不影响本批
+  let done = 0, skip = 0, fail = 0, idx = 0;
+  const worker = async (wi) => {
+    await sleep(wi * 500);
+    while (!stopFlag) {
+      const i = idx++;
+      if (i >= recordIds.length) return;
+      const rid = recordIds[i];
+      let taskId = '';
+      try {
+        if ($('skipMode').value === 'skip' && await cellFilled(outFid, rid)) { skip++; log('· 行' + rid.slice(-6) + ' 已有片,跳过'); continue; }
+        // 防重复扣费:该行已有在途任务(提交过还没取回)就绝不重新提交,提示走续查
+        const pend = await getPendingTask(rid);
+        if (pend) { skip++; log('· 行' + rid.slice(-6) + ' 已有在途任务(' + String(pend.id).slice(0, 10) + '…),不重复提交——点「⏯ 续查」取片'); continue; }
+        const input = await buildInput(rid);
+        if (!input) { skip++; log('· 行' + rid.slice(-6) + ' 无参考图/无提示词,跳过'); continue; }
+        const ac = new AbortController(); aborters.add(ac);
+        const deadline = Date.now() + VIDEO_TIMEOUT_MS;
+        const timer = setTimeout(() => ac.abort(), VIDEO_TIMEOUT_MS);
+        try {
+          taskId = await submitVideo(ctx, input, ac.signal);
+          await setTaskCell(rid, '⏳' + ctx.kind + ':' + taskId);
+          log('⏳ 行' + rid.slice(-6) + ' 已提交(任务 ' + String(taskId).slice(0, 12) + '…),生成通常2-6分钟');
+          const result = await pollVideo(ctx, taskId, ac.signal, deadline);
+          const bytes = await downloadVideo(ctx, taskId, result, ac.signal);
+          const sz = await writeVideoCell(outFid, rid, bytes);
+          await setTaskCell(rid, '✅' + ctx.kind + ':' + taskId);
+          done++;
+          log('✅ 行' + rid.slice(-6) + ' 成片写入附件列(' + (Math.round(sz / 1024 / 102.4) / 10) + 'MB)');
+        } finally { clearTimeout(timer); aborters.delete(ac); }
+      } catch (e) {
+        fail++;
+        const msg = e.name === 'AbortError' ? '超时/已停止' : e.message;
+        // 云端终态失败写❌(出续查队列,主按钮可重新提交);可恢复的(超时/停止/网络)保留⏳等续查
+        if (taskId) await setTaskCell(rid, (e.permanent ? '❌' : '⏳') + ctx.kind + ':' + taskId + ' ✗' + String(msg).slice(0, 60));
+        log('行' + rid.slice(-6) + ' ' + msg, 1);
+      }
+    }
+  };
+  await Promise.allSettled(Array.from({ length: Math.min(conc, recordIds.length) }, (_, i) => worker(i)));
+  log('── 完成: 成功' + done + ' / 跳过' + skip + ' / 失败' + fail + (stopFlag ? ' (手动停止,在途任务仍在云端,可「续查」)' : '') + ' ──');
+}
+
+// ── 断点续查:扫「任务ID列」里 ⏳ 且附件还空的行,接着轮询取片(提交过的钱不浪费) ──
+async function findPendingVideoRows() {
+  const fid = $('taskCol').value;
+  if (!fid) { log('请先在任务配置里选「任务ID列」,续查靠它找回任务号', 1); return []; }
+  const outFid = $('outputSel').value;
+  const all = await listRecordIds();
+  const rows = [];
+  for (const rid of all) {
+    if (stopFlag) break;
+    let s = ''; try { s = (await table.getCellString(fid, rid)) || ''; } catch {}
+    const m = s.match(/⏳(ark|oai):([A-Za-z0-9._-]+)/);
+    if (!m) continue;
+    if (await cellFilled(outFid, rid)) continue;
+    if (m[1] !== vidKind()) { log('· 行' + rid.slice(-6) + ' 是「' + m[1] + '」格式提交的,与当前接口格式不符,跳过'); continue; }
+    rows.push({ rid, kind: m[1], id: m[2] });
+  }
+  return rows;
+}
+
+async function resumeVideoTasks(rows) {
+  const outFid = $('outputSel').value;
+  const conc = Math.max(1, Math.min(10, parseInt($('concurrency').value) || 3));
+  const ctx = vidCtx();
+  let done = 0, fail = 0, idx = 0;
+  const worker = async () => {
+    while (!stopFlag) {
+      const i = idx++;
+      if (i >= rows.length) return;
+      const { rid, id } = rows[i];
+      const ac = new AbortController(); aborters.add(ac);
+      const deadline = Date.now() + VIDEO_TIMEOUT_MS;
+      const timer = setTimeout(() => ac.abort(), VIDEO_TIMEOUT_MS);
+      try {
+        log('⏯ 行' + rid.slice(-6) + ' 续查任务 ' + String(id).slice(0, 12) + '…');
+        const result = await pollVideo(ctx, id, ac.signal, deadline);
+        const bytes = await downloadVideo(ctx, id, result, ac.signal);
+        const sz = await writeVideoCell(outFid, rid, bytes);
+        await setTaskCell(rid, '✅' + ctx.kind + ':' + id);
+        done++;
+        log('✅ 行' + rid.slice(-6) + ' 成片写入附件列(' + (Math.round(sz / 1024 / 102.4) / 10) + 'MB)');
+      } catch (e) {
+        fail++;
+        const msg = e.name === 'AbortError' ? '超时/已停止' : e.message;
+        await setTaskCell(rid, (e.permanent ? '❌' : '⏳') + ctx.kind + ':' + id + ' ✗' + String(msg).slice(0, 60));
+        log('行' + rid.slice(-6) + ' ' + msg, 1);
+      } finally { clearTimeout(timer); aborters.delete(ac); }
+    }
+  };
+  await Promise.allSettled(Array.from({ length: Math.min(conc, rows.length) }, () => worker()));
+  log('── 续查完成: 成功' + done + ' / 失败' + fail + ' ──');
+}
+
 // ── 并发池 ──
 async function processRecords(recordIds) {
   const outFid = $('outputSel').value;
@@ -654,15 +971,18 @@ async function processRecords(recordIds) {
   log('── 完成: 成功' + done + ' / 跳过' + skip + ' / 失败' + fail + (stopFlag ? ' (手动停止)' : '') + ' ──');
 }
 
-async function guardedRun(getTargets, allowStopToggle) {
+async function guardedRun(getTargets, allowStopToggle, processor, opts) {
   if (running) {
     if (allowStopToggle) { stopFlag = true; aborters.forEach(a => a.abort()); log('⏹ 停止中…在途请求已中断'); }
     else log('正在运行中,先停止再试', 1);
     return;
   }
-  if (!$('apiKey').value) { log('请先填 API Key', 1); return; }
+  const isVid = isVideoMode();
+  if (isVid) {
+    if (!$('vidApiBase').value.trim() || !$('vidApiKey').value.trim()) { log('视频模式:请先在「🎬 视频模式独立配置」里填 API 地址和 Key', 1); return; }
+  } else if (!$('apiKey').value) { log('请先填 API Key', 1); return; }
   if (!$('outputSel').value) { log('请先在表里建一个"附件"字段当输出列', 1); return; }
-  if (!$('prompt').value.trim() && !selectedInputs().length) { log('请写生图提示词,或选一个含提示词/产品图的输入列', 1); return; }
+  if (!(opts && opts.noPrompt) && !$('prompt').value.trim() && !selectedInputs().length) { log('请写提示词,或选一个含提示词/产品图的输入列', 1); return; }
   saveCfg();
   running = true; stopFlag = false;
   const btn = $('runBtn'); btn.textContent = '⏹ 点击停止'; btn.classList.add('stop');
@@ -671,9 +991,9 @@ async function guardedRun(getTargets, allowStopToggle) {
     const targets = await getTargets();
     if (!targets || !targets.length) { if (!stopFlag) log('没有待处理的行(输出已填 或 输入为空)'); return; }
     log('待处理 ' + targets.length + ' 行,并发 ' + ($('concurrency').value || 3));
-    await processRecords(targets);
+    await (processor || (isVid ? processVideoRecords : processRecords))(targets);
   } catch (e) { log('运行出错: ' + e.message, 1); }
-  finally { running = false; stopFlag = false; btn.textContent = '▶ 开始出图（附件列为空的行）'; btn.classList.remove('stop'); }
+  finally { running = false; stopFlag = false; btn.textContent = runBtnLabel(); btn.classList.remove('stop'); }
 }
 
 $('runBtn').onclick = () => guardedRun(async () => {
@@ -681,13 +1001,16 @@ $('runBtn').onclick = () => guardedRun(async () => {
   const max = parseInt($('maxRows').value) || 10;
   const outFid = $('outputSel').value;
   const targets = [];
+  let pend = 0;
   for (const rid of all) {
     if (stopFlag) break;
     if (targets.length >= max) break;
     if ($('skipMode').value !== 'overwrite' && await cellFilled(outFid, rid)) continue;   // 输出已填→跳
+    if (isVideoMode() && await getPendingTask(rid)) { pend++; continue; }   // ★在途任务→绝不重复提交(重复扣费),走「续查」取片
     if (!(await hasInput(rid))) continue;   // ★输入为空→不排任务
     targets.push(rid);
   }
+  if (pend) log('· ' + pend + ' 行有在途任务已跳过——点「⏯ 续查未完成的视频任务」取片,不重复扣费');
   return targets;
 }, true);
 
@@ -696,6 +1019,9 @@ $('runSelBtn').onclick = () => guardedRun(async () => {
   if (!sel || !sel.recordId) { log('请先在表里点选一个单元格定位到某一行', 1); return []; }
   return [sel.recordId];
 }, false);
+
+// allowStopToggle=false:运行中点「续查」提示先停止,而不是把当前批次静默停掉(要停点主按钮)
+$('resumeBtn').onclick = () => guardedRun(findPendingVideoRows, false, resumeVideoTasks, { noPrompt: true });
 
 init();
 </script>
