@@ -7,7 +7,7 @@
 自定义 API 地址 · 【列名】模板引用 · 并发+重试 · 结果直接写回表格
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg)](LICENSE)
-[![单文件](https://img.shields.io/badge/单文件-index.html-2ee6d6.svg)](index.html)
+[![静态插件](https://img.shields.io/badge/静态插件-HTML%2BJS-2ee6d6.svg)](index.html)
 [![飞书多维表格](https://img.shields.io/badge/飞书-多维表格插件-4c8dff.svg)](#-安装到多维表格)
 
 </div>
@@ -26,13 +26,17 @@
 - ⚡ **并发 + 超时 + 重试**：几百行也能安心挂机跑，已有内容的行可跳过或覆盖
 - 🔒 **配置只存本机浏览器**，Key 不上传；内联官方 SDK，零外部依赖请求
 
+## GPT Image 2 修复与部署
+
+「白底图」附件 → GPT Image 2 场景图 →「主图」附件的配置、安全中转、免费测试及 GitHub Pages 部署，请阅读 [操作指南](docs/gpt-image-2.md)。官方 Key 只放服务端，插件填写独立中转令牌。
+
 ## 🚀 安装到多维表格
 
-本插件就是一个 `index.html`，按飞书「自定义插件」方式接入：
+本插件由 `index.html` 和同目录的 `image-api.js` 组成，按飞书「自定义插件」方式接入：
 
 1. **拿到插件 URL**：
    - 方式 A：直接用本仓库的 GitHub Pages 地址（见仓库右侧 About 栏链接）
-   - 方式 B：自己托管——把 `index.html` 放到任意静态服务器 / 内网地址
+   - 方式 B：自己托管——把 `index.html` 和 `image-api.js` 一起放到静态服务器 / 内网地址
 2. 打开你的**飞书多维表格** → 右上角「插件」→「自定义插件」→ 添加插件，粘贴 URL
 3. 侧边栏打开插件，开始配置
 
@@ -78,7 +82,7 @@
 
 - 🐛 接口跑不通 / 写入失败 → [提 Bug](../../issues)，说清你的 API 类型
 - 💡 想支持新模型 / 新任务类型 / 新写回逻辑 → [提建议](../../issues)，被采纳的进下个版本
-- 🔧 全部代码就一个 `index.html`，想改直接改，PR 欢迎
+- 🔧 界面在 `index.html`，图片管线在 `image-api.js`，想改直接改，PR 欢迎
 
 > 觉得有用的话点个 ⭐ Star，是对持续更新最大的支持。
 

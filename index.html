@@ -37,7 +37,7 @@
   <h2>① 模型配置（存在本机浏览器，不上传）</h2>
   <label>API 地址</label>
   <input type="text" id="apiBase" placeholder="https://api.openai.com/v1/chat/completions 或任意中转地址">
-  <label>API Key</label>
+  <label>API Key / 安全中转访问令牌</label>
   <input type="password" id="apiKey" placeholder="sk-...">
   <label id="modelLabel">对话模型（不确定就留空，默认 gpt-4o-mini）</label>
   <input type="text" id="model" list="textModelList" placeholder="留空=gpt-4o-mini">
@@ -61,6 +61,7 @@
     <option value="video">🎬 视频生成（生成4-15秒视频写进附件列）</option>
   </select>
   <div class="hint" id="textHint">文本模式：模型名填对话模型（如 gpt-4o-mini）；结果写进文本列。选了📎输入图=发给视觉模型看图写文。</div>
+  <div class="hint">官方 OpenAI Key 请仅保存在服务端；图片模式推荐填写自己的 HTTPS 安全中转地址及访问令牌。浏览器直连可能受 CORS 限制。不要在共享电脑保存 Key。</div>
   <div class="hint" id="imgHint" style="display:none">图片模式：模型名填生图模型（如 gpt-image-2 / doubao-seedream-4-0）；选了📎输入图=图生图(保产品)，没选=文生图。</div>
   <div id="videoCfg" style="display:none">
     <div class="hint">🎬 视频模式独立配置。方舟官方没开浏览器跨域，API 地址填你服务器上的透传代理（形如 http://127.0.0.1:8000/api/ark/v3）；选中转站格式则直接填中转地址。⚠️ Seedance 2.0 约1元/秒（15秒≈15元/条），先用「只跑当前光标所在行」试效果再批量。</div>
@@ -496,6 +497,7 @@ html body {
 //# sourceMappingURL=/sm/a6f526bd5d6e5f46169550416b3eea14dc63ecfa095a21af51c761e6443576fa.map
 window.__BITABLE__ = tQ;  /* tQ = SDK内部 export{ tQ as bitable } 的真实别名 */
 </script>
+<script src="./image-api.js"></script>
 <script type="module">
 const $ = id => document.getElementById(id);
 const log = (msg, isErr) => { const el = $('log'); el.style.display='block'; el.textContent += (isErr?'✗ ':'') + msg + '\n'; el.scrollTop = el.scrollHeight; };
@@ -605,7 +607,7 @@ function switchTaskType() {
 let table = null, tableId = null, fieldMetas = [];
 let running = false, stopFlag = false;
 const aborters = new Set();
-const MAX_IMGS_PER_ROW = 3;
+const MAX_IMGS_PER_ROW = 16;
 const REQ_TIMEOUT_MS = 200000;   // 单请求硬超时:防上游API空转,超时即断,绝不重试
 
 async function refreshTable() {
@@ -696,7 +698,7 @@ async function hasInput(rid) {
   const cols = selectedInputs().map(fieldMetaByName);
   if (!cols.length) return !!$('prompt').value.trim();
   for (const meta of cols) {
-    if (meta.type === 17) { const c = await table.getCellValue(meta.id, rid).catch(() => null); if (Array.isArray(c) && c.some(a => ((a && a.type) || '').startsWith('image/'))) return true; }
+    if (meta.type === 17) { const c = await table.getCellValue(meta.id, rid).catch(() => null); if (Array.isArray(c) && c.some(ImageAPI.isImage)) return true; }
     else { const s = await table.getCellString(meta.id, rid).catch(() => ''); if (s && s.trim()) return true; }
   }
   return false;
@@ -710,15 +712,9 @@ async function buildInput(recordId) {
   for (const n of selectedInputs()) {
     const meta = fieldMetaByName(n);
     if (meta.type === 17) {
-      try {
-        const cell = await table.getCellValue(meta.id, recordId);
-        const imgs = (cell || []).filter(a => ((a && a.type) || '').startsWith('image/'));
-        for (const att of imgs) {
-          if (imageUrls.length >= MAX_IMGS_PER_ROW) break;
-          try { const u = await table.getAttachmentUrl(att.token, meta.id, recordId); if (u) imageUrls.push(u); }
-          catch { try { const u = await table.getAttachmentUrl(att.token); if (u) imageUrls.push(u); } catch {} }
-        }
-      } catch {}
+      const urls = await ImageAPI.attachmentUrls(table, meta.id, recordId, MAX_IMGS_PER_ROW);
+      if (imageUrls.length + urls.length > MAX_IMGS_PER_ROW) throw new Error('本行参考图过多，请减少所选附件');
+      imageUrls.push(...urls);
     } else {
       let v = ''; try { v = (await table.getCellString(meta.id, recordId)) || ''; } catch {}
       v = v.trim();
@@ -726,6 +722,7 @@ async function buildInput(recordId) {
       else if (v) extra.push(v);   // 未被模板引用的文本列→当提示词内容
     }
   }
+  if (isImageMode() && selectedInputs().some(n => fieldMetaByName(n).type === 17) && !imageUrls.length) throw new Error('所选附件输入列没有可用商品图，本行未提交生图');
   let prompt = text.trim();
   if (extra.length) prompt = prompt ? prompt + '\n' + extra.join('\n') : extra.join('\n');
   if (!imageUrls.length && !prompt) return null;   // 既无参考图也无提示词→不生成
@@ -766,50 +763,14 @@ async function writeText(fid, rid, text) {
   await table.setCellValue(fid, rid, text);
 }
 
-function imagesEndpoint(kind) { const b = $('apiBase').value.replace(/\/chat\/completions.*$/, '').replace(/\/+$/, ''); return b + '/images/' + kind; }
-
+function imagesEndpoint(kind) { return ImageAPI.endpoint($('apiBase').value, kind); }
 async function callImage(input, signal) {
-  const { text, imageUrls } = input;
-  const size = $('imgSize').value || '1024x1536';
-  const model = $('model').value.trim() || 'gpt-image-2';
-  const edit = imageUrls.length > 0;   // 有参考图→图生图(保产品),否则文生图
-  // ModelSell 的统一图片入口是 /images/generations；有参考图时通过 images 数组传入。
-  // 不直接切 /images/edits：部分 gpt-image-2 渠道虽支持参考图，但该兼容端点会返回 404。
-  const url = imagesEndpoint('generations');
-  const auth = 'Bearer ' + $('apiKey').value;
-  const body = edit ? { model, images: imageUrls, prompt: text, size, response_format: 'url' }
-                    : { model, prompt: text, size };
-  let resp = await fetch(url, { method: 'POST', signal, headers: { 'Content-Type': 'application/json', 'Authorization': auth }, body: JSON.stringify(body) });
-  if (edit && [400, 404, 415, 422].includes(resp.status)) {
-    // 兼容只接受单数 image 字段的统一端点（4xx 未生成，重试不会重复出图）。
-    const jsonErr = (await resp.text()).slice(0, 200);
-    resp = await fetch(url, {
-      method: 'POST', signal,
-      headers: { 'Content-Type': 'application/json', 'Authorization': auth },
-      body: JSON.stringify({ model, image: imageUrls[0], prompt: text, size, response_format: 'url' })
-    });
-    if (!resp.ok) {
-      const fallbackErr = (await resp.text()).slice(0, 200);
-      throw new Error('生图API ' + resp.status + ': ' + fallbackErr + '；首次错误: ' + jsonErr);
-    }
-  }
-  if (!resp.ok) throw new Error('生图API ' + resp.status + ': ' + (await resp.text()).slice(0, 200));
-  const data = await resp.json();
-  const first = data.data && data.data[0];
-  if (first && first.b64_json) return { b64: first.b64_json, edit };
-  if (first && first.url) return { url: first.url, edit };
-  throw new Error('生图返回无 b64/url: ' + JSON.stringify(data).slice(0, 180));
+  return ImageAPI.generate({ base: $('apiBase').value, key: $('apiKey').value.trim(),
+    model: $('model').value.trim() || 'gpt-image-2', size: $('imgSize').value || '1024x1536',
+    text: input.text, imageUrls: input.imageUrls }, signal);
 }
-
-async function writeImage(fid, rid, res, signal) {
-  let bytes;
-  if (res.b64) { const bin = atob(res.b64); bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); }
-  else { const r = await fetch(res.url, { signal }); if (!r.ok) throw new Error('下载生成图失败 ' + r.status); bytes = new Uint8Array(await r.arrayBuffer()); }
-  const file = new File([bytes], 'ai_' + rid.slice(-6) + '_' + Date.now() + '.png', { type: 'image/png' });
-  const tokens = await bitable.base.batchUploadFile([file]);
-  const val = [{ name: file.name, size: file.size, type: file.type, token: tokens[0], timeStamp: file.lastModified || Date.now() }];
-  await table.setCellValue(fid, rid, val);
-  return file.size;
+async function writeImage(fid, rid, result, signal) {
+  return ImageAPI.write({table, base: bitable.base, fid, rid, result, signal});
 }
 
 // ══════════ 🎬 视频生成(全行业都是异步任务制:提交→轮询→取片) ══════════
