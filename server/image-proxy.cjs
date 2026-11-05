@@ -1,10 +1,39 @@
 // Node >= 22. Fixed OpenAI upstream; never accepts upstream URLs or keys from clients.
 const http = require('node:http');
+const https = require('node:https');
 const { timingSafeEqual } = require('node:crypto');
-function createProxy({apiKey, token, origins, fetcher = fetch, maxBytes = 52 * 1024 * 1024}) {
+const UPLOAD_TIMEOUT_MS = 300000;
+const GENERATION_TIMEOUT_MS = 600000;
+
+// Native HTTPS avoids fetch's implicit 300s headers timeout for image generation.
+async function openAIRequest(url, {headers, body, signal}, requestImpl = https.request) {
+  // Serialize multipart with the standard Request implementation, including boundary.
+  const request = new Request(url, {method:'POST', headers, body, signal});
+  const bytes = await request.arrayBuffer();
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const upstream = requestImpl(url, {method:'POST', headers:Object.fromEntries(request.headers), signal}, response => {
+      const chunks = []; let size = 0;
+      response.on('data', chunk => {
+        size += chunk.length;
+        if (size > 64 * 1024 * 1024) response.destroy(new Error('Upstream response too large'));
+        else chunks.push(chunk);
+      });
+      response.on('error', reject);
+      response.on('end', () => resolve({ok:response.statusCode >= 200 && response.statusCode < 300, status:response.statusCode, json:async()=>JSON.parse(Buffer.concat(chunks).toString())}));
+    });
+    upstream.on('error', reject);
+    upstream.end(Buffer.from(bytes));
+  });
+}
+function createProxy({apiKey, token, origins, fetcher = openAIRequest, maxBytes = 52 * 1024 * 1024, generationTimeoutMs = GENERATION_TIMEOUT_MS}) {
   if (!apiKey || !token || token.length < 32 || !origins?.length || origins.includes('*')) throw Error('配置 OPENAI_API_KEY、至少32字符的 PROXY_TOKEN 和明确的 ALLOWED_ORIGINS');
   let active = 0;
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, {'Content-Type':'application/json', 'Cache-Control':'no-store'});
+      return res.end(JSON.stringify({status:'ok'}));
+    }
     const origin = req.headers.origin;
     const reply = (status, message) => { res.writeHead(status, {'Content-Type':'application/json', 'Cache-Control':'no-store'}); res.end(JSON.stringify({error:{message}})); };
     if (!origins.includes(origin)) return reply(403, 'Origin denied');
@@ -20,7 +49,7 @@ function createProxy({apiKey, token, origins, fetcher = fetch, maxBytes = 52 * 1
     if (active >= 2) return reply(429, 'Proxy busy; retry manually');
     active++;
     const controller = new AbortController();
-    const timer = setTimeout(()=>controller.abort(), 300000);
+    let timer;
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     try {
       const chunks = []; let length = 0;
@@ -46,6 +75,8 @@ function createProxy({apiKey, token, origins, fetcher = fetch, maxBytes = 52 * 1
       }
       const get = k => edit ? data.get(k) : data[k];
       if (get('model') !== 'gpt-image-2' || String(get('n')) !== '1' || get('output_format') !== 'png' || !['1024x1024','1024x1536','1536x1024'].includes(get('size')) || typeof get('prompt') !== 'string' || !get('prompt').trim() || get('prompt').length > 32000) return reply(400,'Invalid model, prompt, size or output options');
+      // Upload parsing has its own server deadline; generation gets a fresh budget.
+      timer = setTimeout(()=>controller.abort(), generationTimeoutMs);
       const upstream = await fetcher('https://api.openai.com' + req.url, {method:'POST', headers, body, signal:controller.signal, redirect:'error'});
       // Do not forward upstream errors, headers or credentials to browser/logs.
       if (!upstream.ok) return reply(upstream.status, 'OpenAI request failed; check account permissions, quota and parameters');
@@ -53,13 +84,25 @@ function createProxy({apiKey, token, origins, fetcher = fetch, maxBytes = 52 * 1
       if (!result.data?.[0]?.b64_json) return reply(502,'OpenAI response missing image');
       res.writeHead(200, {'Content-Type':'application/json','Cache-Control':'no-store'});
       res.end(JSON.stringify({data:[{b64_json:result.data[0].b64_json}]}));
-    } catch (e) { if (!res.headersSent) reply(e.name === 'AbortError' ? 504 : 502, 'Image proxy request failed; no automatic retry'); }
+    } catch (e) { if (!res.headersSent) reply(controller.signal.aborted ? 504 : 502, 'Image proxy request failed; no automatic retry'); }
     finally { clearTimeout(timer); active--; }
   });
+  // requestTimeout covers receiving the upload, not waiting for OpenAI's response.
+  server.requestTimeout = UPLOAD_TIMEOUT_MS;
+  server.headersTimeout = 60000;
+  server.timeout = 0;
+  return server;
 }
-if (require.main === module) {
-  const server = createProxy({apiKey:process.env.OPENAI_API_KEY, token:process.env.PROXY_TOKEN, origins:(process.env.ALLOWED_ORIGINS || '').split(',').map(s=>s.trim()).filter(Boolean)});
-  server.requestTimeout = 60000;
-  server.listen(Number(process.env.PORT || 8787), '127.0.0.1', ()=>console.log('Image proxy listening on loopback; expose through authenticated HTTPS ingress'));
+function listenOptions(env = process.env) {
+  const port = Number(env.PORT ?? 8787);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw Error('PORT must be an integer from 0 to 65535');
+  return {port, host:env.RENDER === 'true' ? '0.0.0.0' : '127.0.0.1'};
 }
-module.exports = {createProxy};
+function startProxy(env = process.env) {
+  const options = listenOptions(env);
+  const server = createProxy({apiKey:env.OPENAI_API_KEY, token:env.PROXY_TOKEN, origins:(env.ALLOWED_ORIGINS || '').split(',').map(s=>s.trim()).filter(Boolean)});
+  server.listen(options.port, options.host, () => console.log('Image proxy listening on ' + options.host + ':' + server.address().port));
+  return server;
+}
+if (require.main === module) startProxy();
+module.exports = {openAIRequest, createProxy, listenOptions, startProxy, UPLOAD_TIMEOUT_MS, GENERATION_TIMEOUT_MS};

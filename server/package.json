@@ -1,0 +1,10 @@
+{
+  "name": "feishu-image-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node image-proxy.cjs",
+    "test": "node ../tests/proxy.test.cjs"
+  }
+}

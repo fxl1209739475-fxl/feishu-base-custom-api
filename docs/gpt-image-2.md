@@ -20,13 +20,50 @@ GitHub Pages 只托管静态网页，不能运行此服务。请在自己的服�
 | `OPENAI_API_KEY` | 官方 Key，仅服务端持有 |
 | `PROXY_TOKEN` | 至少 32 字符的独立随机访问令牌，可用 `openssl rand -hex 32` 本地生成 |
 | `ALLOWED_ORIGINS` | 例如 `https://zephzhou.github.io`；多个明确来源用英文逗号分隔；不含仓库路径 |
-| `PORT` | 默认 8787 |
+| `PORT` | 本地默认 8787；Render 自动注入，不需要手动设置 |
 
-启动：`node server/image-proxy.cjs`。服务监听 `127.0.0.1`，必须通过自己的 HTTPS 反向代理转发到该端口。入口请求体限制至少 52MiB、读取超时至少 310 秒，不记录 Authorization、请求体或响应图片。默认单次请求合计最多 52MiB，最多两个并行上游请求；图片很多或较大时先压缩原图。插件并发建议设为 1 或 2。
+启动：`node server/image-proxy.cjs`。本地默认监听 `127.0.0.1`，应通过自己的 HTTPS 反向代理转发到该端口；Render 自动提供 `RENDER=true` 时监听 `0.0.0.0:$PORT`。入口请求体限制至少 52MiB，生成响应等待超时至少 610 秒，不记录 Authorization、请求体或响应图片。默认单次请求合计最多 52MiB，最多两个并行上游请求；图片很多或较大时先压缩原图。插件并发建议设为 1 或 2。
 
 插件 API 地址填 `https://你的中转域名/v1`，API Key 一栏填 **PROXY_TOKEN**，模型填 `gpt-image-2`。中转只支持该模型、单张 PNG 输出和界面三种尺寸，拒绝任意上游 URL，不代下载附件、不接受用户提供的官方 Key。文本、视频继续使用原有配置及服务。
 
 该最小服务适合个人/可信团队使用：CORS 不是身份认证，令牌才是访问凭证。令牌会沿用插件原有浏览器配置保存机制，任何拥有令牌的人都可能消耗你的额度；请定期轮换，并设置 OpenAI 项目预算/限额。对外多用户服务应在 HTTPS 入口增加用户登录、逐用户限流和额度控制。真实 Key 不应进入 localStorage。
+
+## Render Web Service 部署（手动操作）
+
+代码修改不会创建 Render 服务或自动部署。合并 PR 后，在 Render 控制台选择 **New → Web Service**，连接 `ZephZhou/feishu-base-custom-api`，填写：
+
+| 设置项 | 值 |
+| --- | --- |
+| Branch | `main` |
+| Language / Runtime | `Node` |
+| Root Directory | `server` |
+| Build Command | `node --check image-proxy.cjs` |
+| Start Command | `npm start`（等价于 `node image-proxy.cjs`） |
+| Health Check Path | `/health` |
+| Auto-Deploy | 如需完全手动发布，选择 `Off` |
+
+本服务没有 npm 依赖，Build Command 只做语法检查，无需安装依赖。`server/.node-version` 指定 Node.js 22 系列，`server/package.json` 要求 Node.js 22 或更高；不要配置低于 22 的 `NODE_VERSION` 覆盖它。Build/Start Command 均从 `server` 工作目录执行。
+
+在 Render 的 **Environment** 中安全填写：
+
+- `OPENAI_API_KEY`：你的官方 OpenAI Key，仅后端持有。
+- `PROXY_TOKEN`：至少 32 字符的独立随机令牌，插件填写这个令牌。
+- `ALLOWED_ORIGINS`：`https://zephzhou.github.io`。如有自定义域名，加入实际页面 Origin，用英文逗号分隔，不带路径或末尾 `/`，不允许 `*`。以浏览器请求实际 Origin 为准，不要直接改成任意来源。
+
+Render 自动注入 `RENDER=true` 和 `PORT`；服务据此绑定 `0.0.0.0` 和平台端口。不要把这些变量或密钥写进 Git、Pages 文件或构建日志。控制台 Secret 不要以命令行参数传入，服务自身日志只记录监听地址和端口。
+
+部署成功后，访问 `https://你的服务名.onrender.com/health`，应只返回 `{"status":"ok"}`。此检查不调用 OpenAI，也不验证账户额度或模型权限。无需给健康检查提供令牌或 Origin；该例外仅适用于精确的 `GET /health`，其他请求仍受原有来源和鉴权限制。
+
+飞书插件图片 API 地址填 `https://你的服务名.onrender.com/v1`，API Key 一栏填 `PROXY_TOKEN`。GitHub Pages 继续只提供现有静态插件，无需改动。中转仍只接受 `/v1/images/generations` 和 `/v1/images/edits`，不会代理聊天、任意 URL 或其他 OpenAI API。
+
+### 超时和资源限制
+
+- HTTP 请求头接收最多 60 秒，图片请求体上传最多 300 秒；上传耗时不会挤占后面的生成预算。
+- 上传解析及参数校验完成后，OpenAI 请求单独最多 600 秒，覆盖发送图片、等待响应和读取响应体；超时返回脱敏的 HTTP 504，不自动重试。
+- 使用 Node 原生 HTTPS 传输，避免 `fetch` 默认约 300 秒的响应头等待上限。客户端断开会终止本地上游连接，但无法保证撤销已开始计费的生成。
+- HTTP 服务器不另设 socket 空闲超时；Render 入口、所选套餐及其他反向代理的限制仍独立生效。免费实例可能冷启动，建议先访问 `/health` 唤醒后，再提交付费请求。
+- **现有插件前端仍有 200 秒整行超时，本次未修改。** 它还包含下载参考图和附件写回时间。超过该时间仍可能被浏览器终止；服务端 600 秒不代表插件能等待 600 秒。如需支持更长生成，应另行修改前端超时或设计异步任务接口。
+- 仍限制每请求合计 52MiB 上传、最多 16 张参考图、同时最多两个生成、单张 PNG 输出。服务缓冲上传和 Base64 返回，选择足够内存的 Render 实例，避免多张大图同时上传；上游响应体最多 64MiB。
 
 ## 飞书使用
 
